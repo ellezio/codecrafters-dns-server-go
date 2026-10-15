@@ -77,25 +77,77 @@ func (h *Header) Serialize() [HeaderSectionBytes]byte {
 
 type Question struct {
 	name  []byte
-	typ   [2]byte
-	class [2]byte
+	typ   uint16
+	class uint16
 }
 
-func (q *Question) SetName(v []byte) {
-	name := make([]byte, len(v)+2)
+func (q *Question) Serialize() []byte {
+	name := encodeLabelSequence(q.name)
+	out := make([]byte, len(name)+4)
+	n := copy(out, name)
+	binary.BigEndian.PutUint16(out[n:n+2], q.typ)
+	binary.BigEndian.PutUint16(out[n+2:n+4], q.class)
+	return out
+}
+
+type Answer struct {
+	name   []byte
+	typ    uint16
+	class  uint16
+	ttl    uint32
+	length uint16
+	data   []byte
+}
+
+func (a *Answer) Serialize() []byte {
+	name := encodeLabelSequence(a.name)
+
+	out := make([]byte, 0, len(name)+10+int(uint(a.length)))
+	buf := bytes.NewBuffer(out)
+	buf.Write(name)
+	_ = binary.Write(buf, binary.BigEndian, a.typ)
+	_ = binary.Write(buf, binary.BigEndian, a.class)
+	_ = binary.Write(buf, binary.BigEndian, a.ttl)
+	_ = binary.Write(buf, binary.BigEndian, a.length)
+	_ = binary.Write(buf, binary.BigEndian, a.data)
+
+	return buf.Bytes()
+}
+
+type Message struct {
+	header   Header
+	question Question
+	answer   Answer
+}
+
+func (m *Message) Serialize() []byte {
+	h := m.header.Serialize()
+	q := m.question.Serialize()
+	a := m.answer.Serialize()
+
+	out := make([]byte, len(h)+len(q)+len(a))
+	n := copy(out, h[:])
+	n += copy(out[n:], q)
+	copy(out[n:], a)
+
+	return out
+}
+
+func encodeLabelSequence(v []byte) []byte {
+	labelSeq := make([]byte, len(v)+2)
 	off := 0
 
 	for {
 		idx := bytes.IndexByte(v, '.')
 		if idx == -1 {
-			name[off] = byte(len(v))
-			copy(name[off+1:], v)
+			labelSeq[off] = byte(len(v))
+			copy(labelSeq[off+1:], v)
 			break
 		}
 
-		name[off] = byte(idx)
+		labelSeq[off] = byte(idx)
 		off++
-		off += copy(name[off:off+idx], v)
+		off += copy(labelSeq[off:off+idx], v)
 
 		if idx+1 > len(v) {
 			break
@@ -104,40 +156,8 @@ func (q *Question) SetName(v []byte) {
 		v = v[idx+1:]
 	}
 
-	name[len(name)-1] = 0
-	q.name = name
-}
-
-func (q *Question) SetType(v uint16) {
-	binary.BigEndian.PutUint16(q.typ[:], v)
-}
-
-func (q *Question) SetClass(v uint16) {
-	binary.BigEndian.PutUint16(q.class[:], v)
-}
-
-func (q *Question) Serialize() []byte {
-	out := make([]byte, len(q.name)+4)
-	n := copy(out, q.name)
-	n += copy(out[n:], q.typ[:])
-	copy(out[n:], q.class[:])
-	return out
-}
-
-type Message struct {
-	header   Header
-	question Question
-}
-
-func (m *Message) Serialize() []byte {
-	h := m.header.Serialize()
-	q := m.question.Serialize()
-
-	result := make([]byte, len(h)+len(q))
-	n := copy(result, h[:])
-	copy(result[n:], q)
-
-	return result
+	labelSeq[len(labelSeq)-1] = 0
+	return labelSeq
 }
 
 func main() {
@@ -167,12 +187,28 @@ func main() {
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
 		message := Message{
-			header:   Header{id: 1234, qr: 1, qdcount: 1},
-			question: Question{},
+			header: Header{
+				id:      1234,
+				qr:      1,
+				qdcount: 1,
+				ancount: 1,
+			},
+
+			question: Question{
+				name:  []byte("codecrafters.io"),
+				typ:   1,
+				class: 1,
+			},
+
+			answer: Answer{
+				name:   []byte("codecrafters.io"),
+				typ:    1,
+				class:  1,
+				ttl:    60,
+				length: 4,
+				data:   []byte{8, 8, 8, 8},
+			},
 		}
-		message.question.SetName([]byte("codecrafters.io"))
-		message.question.SetType(1)
-		message.question.SetClass(1)
 
 		response := message.Serialize()
 

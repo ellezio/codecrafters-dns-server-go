@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -74,8 +75,69 @@ func (h *Header) Serialize() [HeaderSectionBytes]byte {
 	return out
 }
 
+type Question struct {
+	name  []byte
+	typ   [2]byte
+	class [2]byte
+}
+
+func (q *Question) SetName(v []byte) {
+	name := make([]byte, len(v)+2)
+	off := 0
+
+	for {
+		idx := bytes.IndexByte(v, '.')
+		if idx == -1 {
+			name[off] = byte(len(v))
+			copy(name[off+1:], v)
+			break
+		}
+
+		name[off] = byte(idx)
+		off++
+		off += copy(name[off:off+idx], v)
+
+		if idx+1 > len(v) {
+			break
+		}
+
+		v = v[idx+1:]
+	}
+
+	name[len(name)-1] = 0
+	q.name = name
+}
+
+func (q *Question) SetType(v uint16) {
+	binary.BigEndian.PutUint16(q.typ[:], v)
+}
+
+func (q *Question) SetClass(v uint16) {
+	binary.BigEndian.PutUint16(q.class[:], v)
+}
+
+func (q *Question) Serialize() []byte {
+	out := make([]byte, len(q.name)+4)
+	n := copy(out, q.name)
+	n += copy(out[n:], q.typ[:])
+	copy(out[n:], q.class[:])
+	return out
+}
+
 type Message struct {
-	header Header
+	header   Header
+	question Question
+}
+
+func (m *Message) Serialize() []byte {
+	h := m.header.Serialize()
+	q := m.question.Serialize()
+
+	result := make([]byte, len(h)+len(q))
+	n := copy(result, h[:])
+	copy(result[n:], q)
+
+	return result
 }
 
 func main() {
@@ -104,8 +166,15 @@ func main() {
 		receivedData := string(buf[:size])
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
-		header := Header{id: 1234, qr: 1}
-		response := header.Serialize()
+		message := Message{
+			header:   Header{id: 1234, qr: 1, qdcount: 1},
+			question: Question{},
+		}
+		message.question.SetName([]byte("codecrafters.io"))
+		message.question.SetType(1)
+		message.question.SetClass(1)
+
+		response := message.Serialize()
 
 		_, err = udpConn.WriteToUDP(response[:], source)
 		if err != nil {

@@ -133,6 +133,46 @@ func (m *Message) Serialize() []byte {
 	return out
 }
 
+func parseHeader(v []byte) Header {
+	h := Header{
+		qr:      1,
+		qdcount: 1,
+		ancount: 1,
+	}
+
+	h.id = binary.BigEndian.Uint16(v[0:2])
+	h.opcode = (v[2] >> 3) & 0x0F
+	h.rd = v[2] & 0x01
+
+	if h.opcode != 0 {
+		h.rcode = 4
+	}
+
+	return h
+}
+
+func parseMessage(v []byte) *Message {
+	message := &Message{
+		header: parseHeader(v[:HeaderSectionBytes]),
+
+		question: Question{
+			name:  []byte("codecrafters.io"),
+			typ:   1,
+			class: 1,
+		},
+
+		answer: Answer{
+			name:   []byte("codecrafters.io"),
+			typ:    1,
+			class:  1,
+			ttl:    60,
+			length: 4,
+			data:   []byte{8, 8, 8, 8},
+		},
+	}
+	return message
+}
+
 func encodeLabelSequence(v []byte) []byte {
 	labelSeq := make([]byte, len(v)+2)
 	off := 0
@@ -186,29 +226,7 @@ func main() {
 		receivedData := string(buf[:size])
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
-		message := Message{
-			header: Header{
-				id:      1234,
-				qr:      1,
-				qdcount: 1,
-				ancount: 1,
-			},
-
-			question: Question{
-				name:  []byte("codecrafters.io"),
-				typ:   1,
-				class: 1,
-			},
-
-			answer: Answer{
-				name:   []byte("codecrafters.io"),
-				typ:    1,
-				class:  1,
-				ttl:    60,
-				length: 4,
-				data:   []byte{8, 8, 8, 8},
-			},
-		}
+		message := parseMessage(buf)
 
 		response := message.Serialize()
 

@@ -82,9 +82,9 @@ type Question struct {
 }
 
 func (q *Question) Serialize() []byte {
-	name := encodeLabelSequence(q.name)
-	out := make([]byte, len(name)+4)
-	n := copy(out, name)
+	// name := encodeLabelSequence(q.name)
+	out := make([]byte, len(q.name)+4)
+	n := copy(out, q.name)
 	binary.BigEndian.PutUint16(out[n:n+2], q.typ)
 	binary.BigEndian.PutUint16(out[n+2:n+4], q.class)
 	return out
@@ -100,11 +100,11 @@ type Answer struct {
 }
 
 func (a *Answer) Serialize() []byte {
-	name := encodeLabelSequence(a.name)
+	// name := encodeLabelSequence(a.name)
 
-	out := make([]byte, 0, len(name)+10+int(uint(a.length)))
+	out := make([]byte, 0, len(a.name)+10+int(uint(a.length)))
 	buf := bytes.NewBuffer(out)
-	buf.Write(name)
+	buf.Write(a.name)
 	_ = binary.Write(buf, binary.BigEndian, a.typ)
 	_ = binary.Write(buf, binary.BigEndian, a.class)
 	_ = binary.Write(buf, binary.BigEndian, a.ttl)
@@ -133,6 +133,10 @@ func (m *Message) Serialize() []byte {
 	return out
 }
 
+func (m *Message) AddAnswer(a Answer) {
+	m.answer = a
+}
+
 func parseHeader(v []byte) Header {
 	h := Header{
 		qr:      1,
@@ -151,25 +155,34 @@ func parseHeader(v []byte) Header {
 	return h
 }
 
+func getLabelSequanceLength(v []byte) int {
+	var i int
+	for i < len(v) && v[i] != 0 {
+		i += int(uint8(v[i])) + 1
+	}
+	return i + 1
+}
+
+func parseQuestion(v []byte) Question {
+	q := Question{}
+
+	l := getLabelSequanceLength(v)
+	q.name = make([]byte, l)
+	copy(q.name, v)
+
+	q.typ = binary.BigEndian.Uint16(v[l : l+2])
+	q.class = binary.BigEndian.Uint16(v[l+2 : l+4])
+
+	return q
+}
+
 func parseMessage(v []byte) *Message {
 	message := &Message{
 		header: parseHeader(v[:HeaderSectionBytes]),
-
-		question: Question{
-			name:  []byte("codecrafters.io"),
-			typ:   1,
-			class: 1,
-		},
-
-		answer: Answer{
-			name:   []byte("codecrafters.io"),
-			typ:    1,
-			class:  1,
-			ttl:    60,
-			length: 4,
-			data:   []byte{8, 8, 8, 8},
-		},
 	}
+
+	message.question = parseQuestion(v[HeaderSectionBytes:])
+
 	return message
 }
 
@@ -227,7 +240,14 @@ func main() {
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
 		message := parseMessage(buf)
-
+		message.AddAnswer(Answer{
+			name:   message.question.name,
+			typ:    1,
+			class:  1,
+			ttl:    60,
+			length: 4,
+			data:   []byte{8, 8, 8, 8},
+		})
 		response := message.Serialize()
 
 		_, err = udpConn.WriteToUDP(response[:], source)

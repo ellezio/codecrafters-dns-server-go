@@ -115,34 +115,49 @@ func (a *Answer) Serialize() []byte {
 }
 
 type Message struct {
-	header   Header
-	question Question
-	answer   Answer
+	header    Header
+	questions []Question
+	answers   []Answer
 }
 
 func (m *Message) Serialize() []byte {
+	var buf [512]byte
 	h := m.header.Serialize()
-	q := m.question.Serialize()
-	a := m.answer.Serialize()
 
-	out := make([]byte, len(h)+len(q)+len(a))
-	n := copy(out, h[:])
-	n += copy(out[n:], q)
-	copy(out[n:], a)
+	out := buf[0:0:512]
+	out = append(out, h[:]...)
+
+	for _, question := range m.questions {
+		q := question.Serialize()
+		out = append(out, q...)
+	}
+
+	for _, answer := range m.answers {
+		a := answer.Serialize()
+		out = append(out, a...)
+	}
 
 	return out
 }
 
-func (m *Message) AddAnswer(a Answer) {
-	m.answer = a
+func (m *Message) AddAnswer() {
+	m.header.ancount = m.header.qdcount
+	m.answers = make([]Answer, 0, m.header.ancount)
+	for _, q := range m.questions {
+		a := Answer{
+			name:   q.name,
+			typ:    1,
+			class:  1,
+			ttl:    60,
+			length: 4,
+			data:   []byte{8, 8, 8, 8},
+		}
+		m.answers = append(m.answers, a)
+	}
 }
 
 func parseHeader(v []byte) Header {
-	h := Header{
-		qr:      1,
-		qdcount: 1,
-		ancount: 1,
-	}
+	h := Header{qr: 1}
 
 	h.id = binary.BigEndian.Uint16(v[0:2])
 	h.opcode = (v[2] >> 3) & 0x0F
@@ -152,38 +167,59 @@ func parseHeader(v []byte) Header {
 		h.rcode = 4
 	}
 
+	h.qdcount = binary.BigEndian.Uint16(v[4:6])
+
 	return h
 }
 
-func getLabelSequanceLength(v []byte) int {
-	var i int
-	for i < len(v) && v[i] != 0 {
-		i += int(uint8(v[i])) + 1
-	}
-	return i + 1
-}
-
-func parseQuestion(v []byte) Question {
+func parseQuestion(v []byte, off int) (Question, int) {
 	q := Question{}
 
-	l := getLabelSequanceLength(v)
-	q.name = make([]byte, l)
-	copy(q.name, v)
+	name := decodeLabelSequence(v, off)
+	l := len(name)
+	off += l
+	q.name = name
 
-	q.typ = binary.BigEndian.Uint16(v[l : l+2])
-	q.class = binary.BigEndian.Uint16(v[l+2 : l+4])
+	q.typ = binary.BigEndian.Uint16(v[off : off+2])
+	q.class = binary.BigEndian.Uint16(v[off+2 : off+4])
 
-	return q
+	return q, l + 4
 }
 
 func parseMessage(v []byte) *Message {
-	message := &Message{
-		header: parseHeader(v[:HeaderSectionBytes]),
+	header := parseHeader(v[:HeaderSectionBytes])
+	questions := make([]Question, 0, header.qdcount)
+
+	off := HeaderSectionBytes
+	for i := uint16(0); i < header.qdcount; i++ {
+		question, n := parseQuestion(v, off)
+		off += n
+		questions = append(questions, question)
 	}
 
-	message.question = parseQuestion(v[HeaderSectionBytes:])
+	return &Message{
+		header:    header,
+		questions: questions,
+	}
+}
 
-	return message
+func decodeLabelSequence(v []byte, off int) []byte {
+	labelSeq := make([]byte, 0)
+
+	for off < len(v) && v[off] != 0 {
+		size := uint8(v[off])
+		// It's a pointer label
+		if size&0xC0 == 0xC0 {
+			off = int(uint(size))
+			continue
+		}
+		size += 1
+		labelSeq = append(labelSeq, v[off:off+int(size)]...)
+		off += int(size)
+	}
+
+	labelSeq = append(labelSeq, 0)
+	return labelSeq
 }
 
 func encodeLabelSequence(v []byte) []byte {
@@ -240,14 +276,7 @@ func main() {
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
 		message := parseMessage(buf)
-		message.AddAnswer(Answer{
-			name:   message.question.name,
-			typ:    1,
-			class:  1,
-			ttl:    60,
-			length: 4,
-			data:   []byte{8, 8, 8, 8},
-		})
+		message.AddAnswer()
 		response := message.Serialize()
 
 		_, err = udpConn.WriteToUDP(response[:], source)

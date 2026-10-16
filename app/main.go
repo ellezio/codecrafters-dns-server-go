@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"net"
 )
@@ -157,7 +158,7 @@ func (m *Message) AddAnswer() {
 }
 
 func parseHeader(v []byte) Header {
-	h := Header{qr: 1}
+	h := Header{}
 
 	h.id = binary.BigEndian.Uint16(v[0:2])
 	h.opcode = (v[2] >> 3) & 0x0F
@@ -175,15 +176,14 @@ func parseHeader(v []byte) Header {
 func parseQuestion(v []byte, off int) (Question, int) {
 	q := Question{}
 
-	name := decodeLabelSequence(v, off)
-	l := len(name)
-	off += l
+	name, n := decodeLabelSequence(v, off)
+	off += n
 	q.name = name
 
 	q.typ = binary.BigEndian.Uint16(v[off : off+2])
 	q.class = binary.BigEndian.Uint16(v[off+2 : off+4])
 
-	return q, l + 4
+	return q, n + 4
 }
 
 func parseMessage(v []byte) *Message {
@@ -203,53 +203,43 @@ func parseMessage(v []byte) *Message {
 	}
 }
 
-func decodeLabelSequence(v []byte, off int) []byte {
+func decodeLabelSequence(v []byte, off int) ([]byte, int) {
 	labelSeq := make([]byte, 0)
+	ref := false
 
+	var n int
 	for off < len(v) && v[off] != 0 {
 		size := uint8(v[off])
 		// It's a pointer label
 		if size&0xC0 == 0xC0 {
-			off = int(uint(size))
+			v[off] = v[off] & 0x3F
+			off = int(binary.BigEndian.Uint16(v[off:]))
+			if !ref {
+				n += 2
+			}
+			ref = true
 			continue
 		}
 		size += 1
 		labelSeq = append(labelSeq, v[off:off+int(size)]...)
 		off += int(size)
+		if !ref {
+			n += int(size)
+		}
 	}
 
 	labelSeq = append(labelSeq, 0)
-	return labelSeq
-}
-
-func encodeLabelSequence(v []byte) []byte {
-	labelSeq := make([]byte, len(v)+2)
-	off := 0
-
-	for {
-		idx := bytes.IndexByte(v, '.')
-		if idx == -1 {
-			labelSeq[off] = byte(len(v))
-			copy(labelSeq[off+1:], v)
-			break
-		}
-
-		labelSeq[off] = byte(idx)
-		off++
-		off += copy(labelSeq[off:off+idx], v)
-
-		if idx+1 > len(v) {
-			break
-		}
-
-		v = v[idx+1:]
+	if !ref {
+		n += 1
 	}
-
-	labelSeq[len(labelSeq)-1] = 0
-	return labelSeq
+	return labelSeq, n
 }
+
+var resolver = flag.String("resolver", "", "")
 
 func main() {
+	flag.Parse()
+
 	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:2053")
 	if err != nil {
 		fmt.Println("Failed to resolve UDP address:", err)
@@ -275,11 +265,61 @@ func main() {
 		receivedData := string(buf[:size])
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
+		var response []byte
 		message := parseMessage(buf)
-		message.AddAnswer()
-		response := message.Serialize()
 
-		_, err = udpConn.WriteToUDP(response[:], source)
+		if *resolver != "" {
+			header := message.header
+			header.qdcount = 1
+			reqHeader := header.Serialize()
+			req := append([]byte{}, reqHeader[:]...)
+
+			message.header.qr = 1
+			message.header.ancount = message.header.qdcount
+			response = message.Serialize()
+
+			for _, question := range message.questions {
+				clear(req[HeaderSectionBytes:])
+				req = req[:HeaderSectionBytes]
+				req = append(req, question.Serialize()...)
+
+				resolverAddr, err := net.ResolveUDPAddr("udp", *resolver)
+				if err != nil {
+					fmt.Println("Failed to resolve UDP address:", err)
+					continue
+				}
+				resolverConn, err := net.DialUDP("udp", nil, resolverAddr)
+				if err != nil {
+					fmt.Println("Failed to dial:", err)
+					continue
+				}
+				fmt.Printf("%v\n", req)
+				_, err = resolverConn.Write(req)
+				if err != nil {
+					fmt.Println("Failed to write:", err)
+					continue
+				}
+				var res [512]byte
+				n, _, err := resolverConn.ReadFromUDP(res[:])
+				if err != nil {
+					fmt.Println("Failed to read:", err)
+					continue
+				}
+
+				if n < len(req) {
+					fmt.Printf("invalid number of read bytes %d\n", n)
+					continue
+				}
+
+				response = append(response, res[len(req):n]...)
+			}
+		} else {
+			message.AddAnswer()
+			message.header.qr = 1
+			response = message.Serialize()
+		}
+
+		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
 			fmt.Println("Failed to send response:", err)
 		}
